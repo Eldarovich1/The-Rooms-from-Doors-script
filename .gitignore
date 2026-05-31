@@ -305,11 +305,20 @@ function findEntity()
             table.insert(scanTargets, obj)
         end
     end
-    -- Также проверяем потомков CurrentRooms — сущность может быть вложена глубже
+    -- Проверяем CurrentRooms: прямые дети комнат + их прямые дети (2 уровня)
+    -- GetDescendants на всём workspace слишком медленно при большом числе комнат
     if workspace:FindFirstChild("CurrentRooms") then
-        for _, obj in pairs(workspace.CurrentRooms:GetDescendants()) do
-            if obj:IsA("Model") and not obj:IsDescendantOf(LocalPlayer.Character) then
-                table.insert(scanTargets, obj)
+        for _, room in pairs(workspace.CurrentRooms:GetChildren()) do
+            for _, obj in pairs(room:GetChildren()) do
+                if obj:IsA("Model") and not obj:IsDescendantOf(LocalPlayer.Character) then
+                    table.insert(scanTargets, obj)
+                end
+                -- Второй уровень вложенности
+                for _, obj2 in pairs(obj:GetChildren()) do
+                    if obj2:IsA("Model") and not obj2:IsDescendantOf(LocalPlayer.Character) then
+                        table.insert(scanTargets, obj2)
+                    end
+                end
             end
         end
     end
@@ -407,27 +416,70 @@ local lastFloorCheckTime  = -999
 local lastBunkerExitTime  = -999
 local lastFastCheckTime   = -999
 
-local function fastA60Check()
+-- Ищем объект по имени только среди прямых детей workspace и CurrentRooms
+-- Не трогаем GetDescendants — слишком медленно для каждого кадра
+local function fastScanByName(pattern1, pattern2, pattern3)
     if not LocalPlayer.Character then return nil end
     local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
     local myPos = hrp.Position
-    for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("Model") then
-            local name = string.lower(obj.Name)
-            if string.find(name, "a60") or string.find(name, "a%-60")
-               or string.find(name, "rush") then
-                local main = obj:FindFirstChild("Main")
-                    or obj:FindFirstChildOfClass("Part")
-                    or obj:FindFirstChildOfClass("MeshPart")
-                if main then
-                    local d = Vector2.new(myPos.X - main.Position.X, myPos.Z - main.Position.Z).Magnitude
-                    if d < 3000 then return obj end
-                end
+
+    local function checkObj(obj)
+        if not obj:IsA("Model") then return nil end
+        local name = string.lower(obj.Name)
+        if (pattern1 and string.find(name, pattern1))
+        or (pattern2 and string.find(name, pattern2))
+        or (pattern3 and string.find(name, pattern3)) then
+            local main = obj:FindFirstChild("Main")
+                or obj:FindFirstChildOfClass("Part")
+                or obj:FindFirstChildOfClass("MeshPart")
+            if main then
+                local d = Vector2.new(myPos.X - main.Position.X, myPos.Z - main.Position.Z).Magnitude
+                if d < 3000 then return obj end
+            end
+        end
+        return nil
+    end
+
+    -- Прямые дети workspace
+    for _, obj in pairs(workspace:GetChildren()) do
+        local found = checkObj(obj)
+        if found then return found end
+    end
+    -- Прямые дети каждой комнаты
+    if workspace:FindFirstChild("CurrentRooms") then
+        for _, room in pairs(workspace.CurrentRooms:GetChildren()) do
+            for _, obj in pairs(room:GetChildren()) do
+                local found = checkObj(obj)
+                if found then return found end
             end
         end
     end
     return nil
+end
+
+local function fastA60Check()
+    return fastScanByName("a60", "a%-60", "rush")
+end
+
+local function fastA120Check()
+    return fastScanByName("a120", "a%-120", nil)
+end
+
+-- Чистим кеш скоростей раз в 30 сек чтобы не рос бесконечно
+local lastCacheCleanTime = 0
+local function cleanSpeedCache()
+    local now = os.clock()
+    if now - lastCacheCleanTime > 30 then
+        lastCacheCleanTime = now
+        for k, v in pairs(a60SpeedCache) do
+            if not v or not pcall(function() return v.lastPos end) then
+                a60SpeedCache[k] = nil
+            elseif (now - v.lastTime) > 15 then
+                a60SpeedCache[k] = nil
+            end
+        end
+    end
 end
 
 local function setCharacterCollision(on)
@@ -492,6 +544,20 @@ RenderConnection = RunService.PreRender:Connect(function()
 
     local now = os.clock()
 
+    -- Чистим кеш скоростей периодически
+    cleanSpeedCache()
+
+    -- Быстрый ранний детект A-120 (каждые 0.05 сек, без полного сканирования)
+    if not isSafeInBunker and not isTeleporting and not isReturning
+       and (a120Mode == "none" or a120Mode == "resuming")
+       and (now - lastFastCheckTime) > 0.05 then
+        local fastA120 = fastA120Check()
+        if fastA120 and a120Mode ~= "navigating" and a120Mode ~= "hiding" then
+            -- Немедленно запускаем полный findEntity чтобы получить тип и обработать
+            lastEntityCheckTime = -999
+        end
+    end
+
     -- Быстрый ранний детект A-60
     if not isSafeInBunker and not isTeleporting and not isReturning
        and a120Mode == "none" and (now - lastFastCheckTime) > 0.05 then
@@ -508,7 +574,7 @@ RenderConnection = RunService.PreRender:Connect(function()
                 currentTrackingEntity = fastEntity
                 lockTimer = now
 
-                wait(1)
+                wait(0.5)
 
                 local floorY = getFloorY(getCurrentRoom())
                 savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
@@ -592,6 +658,9 @@ RenderConnection = RunService.PreRender:Connect(function()
         -- чтобы новый A-120 сразу детектился
         currentTarget = nil; a120Mode = "none"; a120Entity = nil
         a120LockerTarget = nil; forceRecomputePath = true; forceEmergencyStop = false
+        -- FIX: сбрасываем кулдаун детекта — следующий A-120 должен быть замечен немедленно
+        lastEntityCheckTime = -999
+        lastFastCheckTime = -999
         task.spawn(function()
             task.wait(0.5)
             AlertLabel.Visible = false
