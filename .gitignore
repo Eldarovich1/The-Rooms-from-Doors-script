@@ -113,9 +113,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             end
         else
             PauseLabel.Visible = false
-            lastEntityCheckTime = -999
-            lastFastCheckTime   = -999
-            lastBunkerExitTime  = -999
+            lastEntityCheckTime  = -999
+            lastFastCheckTime    = -999
+            lastFastCheckTimeA60  = -999
+            lastFastCheckTimeA120 = -999
+            lastBunkerExitTime   = -999
             forceRecomputePath  = true
             currentTarget       = nil
         end
@@ -401,11 +403,15 @@ local a120Entity          = nil
 
 local lastValidSurfacePos = HumanoidRootPart.Position
 
-local lastEntityCheckTime = -999
-local cachedFloorY        = -25
-local lastFloorCheckTime  = -999
-local lastBunkerExitTime  = -999
-local lastFastCheckTime   = -999
+local lastEntityCheckTime  = -999
+local cachedFloorY         = -25
+local lastFloorCheckTime   = -999
+local lastBunkerExitTime   = -999
+-- FIX: Разделяем таймеры A60 и A120 — раньше был один lastFastCheckTime,
+-- из-за чего после проверки A120 таймер сбрасывался и A60 уже не проверялся
+local lastFastCheckTimeA60 = -999
+local lastFastCheckTimeA120 = -999
+local lastFastCheckTime    = -999  -- оставляем для обратной совместимости со сбросами в паузе
 
 -- FIX #2: Флаг немедленной обработки А-120 — чтобы не ждать следующего тика
 local a120PendingReact    = false
@@ -569,23 +575,22 @@ RenderConnection = RunService.PreRender:Connect(function()
 
     cleanSpeedCache()
 
-    -- FIX #2: А-120 быстрый детект — каждые 0.03 сек (было 0.05)
-    -- И немедленно реагируем, не ждём следующего тика основного детекта
+    -- А-120 быстрый детект — каждые 0.03 сек, свой таймер
     if not isSafeInBunker and not isTeleporting and not isReturning
        and (a120Mode == "none" or a120Mode == "resuming")
-       and (now - lastFastCheckTime) > 0.03 then
-        lastFastCheckTime = now
+       and (now - lastFastCheckTimeA120) > 0.03 then
+        lastFastCheckTimeA120 = now
         local fastA120 = fastA120Check()
         if fastA120 then
-            -- Немедленная реакция без задержки
             reactToA120Immediately(fastA120, hrp, humanoid)
         end
     end
 
-    -- Быстрый детект A-60 (отдельно от А-120)
+    -- А-60 быстрый детект — каждые 0.03 сек, СВОЙ отдельный таймер
+    -- (раньше был общий lastFastCheckTime — из-за этого A60 не проверялся)
     if not isSafeInBunker and not isTeleporting and not isReturning
-       and a120Mode == "none" and (now - lastFastCheckTime) > 0.03 then
-        lastFastCheckTime = now
+       and a120Mode == "none" and (now - lastFastCheckTimeA60) > 0.03 then
+        lastFastCheckTimeA60 = now
         local fastEntity = fastA60Check()
         if fastEntity and not isSafeInBunker then
             if (now - lastBunkerExitTime) > 2.0 then
