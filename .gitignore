@@ -208,47 +208,46 @@ local BROKEN_COLOR = Color3.fromRGB(84, 90, 98)
 local COLOR_TOL = 12  -- допуск на каждый канал (0-255)
 
 local function isLockerWorking(obj)
-    -- Сразу отсеиваем по имени модели
     if string.find(obj.Name, "BrokenLocker") then return false end
-    -- Ищем MeshPart или Part с именем "Base" среди потомков
     for _, child in pairs(obj:GetDescendants()) do
         if child.Name == "Base" and (child:IsA("MeshPart") or child:IsA("Part") or child:IsA("BasePart")) then
             local c = child.Color
-            -- Если цвет совпадает с цветом сломанного — шкаф сломан
             if math.abs(c.R*255 - BROKEN_COLOR.R*255) <= COLOR_TOL
             and math.abs(c.G*255 - BROKEN_COLOR.G*255) <= COLOR_TOL
             and math.abs(c.B*255 - BROKEN_COLOR.B*255) <= COLOR_TOL then
                 return false
             end
-            -- Нашли Base с другим цветом — шкаф рабочий
             return true
         end
     end
-    -- Нет Base вообще — считаем рабочим (не исключаем без причины)
     return true
 end
 
+-- FIX #1: Ищем шкафы в текущей И в 5 предыдущих комнатах (вместо 1)
 local function findNearestLocker()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return nil end
     local myPos = LocalPlayer.Character.HumanoidRootPart.Position
     local nearest, nearestDist = nil, math.huge
     local currentRoom = getCurrentRoom()
     if not currentRoom then return nil end
+
     local roomsToScan = {currentRoom}
-    local prevRoom = workspace.CurrentRooms:FindFirstChild(tostring(LatestRoom.Value - 1))
-        or workspace.CurrentRooms:FindFirstChild(string.format("%04d", LatestRoom.Value - 1))
-    if prevRoom then table.insert(roomsToScan, prevRoom) end
+    -- Сканируем до 5 предыдущих комнат
+    for offset = 1, 5 do
+        local prevRoom = workspace.CurrentRooms:FindFirstChild(tostring(LatestRoom.Value - offset))
+            or workspace.CurrentRooms:FindFirstChild(string.format("%04d", LatestRoom.Value - offset))
+        if prevRoom then
+            table.insert(roomsToScan, prevRoom)
+        end
+    end
+
     for _, room in pairs(roomsToScan) do
         for _, obj in pairs(room:GetDescendants()) do
             if obj:IsA("Model") and (string.find(obj.Name, "Locker") or string.find(obj.Name, "Wardrobe")) then
-                -- Пропускаем сломанные шкафы
                 if isLockerWorking(obj) then
                     local root = obj:FindFirstChild("Main") or obj:FindFirstChildOfClass("Part")
                         or obj:FindFirstChildOfClass("MeshPart") or obj.PrimaryPart
                     if root then
-                        -- FIX: Приоритизируем шкафы на том же этаже.
-                        -- Штрафуем шкафы с большой разницей по Y — умножаем YDiff на 4,
-                        -- чтобы шкаф на другом этаже (dY > 8) проигрывал дальнему на том же этаже.
                         local xzDist = Vector2.new(myPos.X - root.Position.X, myPos.Z - root.Position.Z).Magnitude
                         local yDiff = math.abs(myPos.Y - root.Position.Y)
                         local weightedDist = xzDist + yDiff * 4
@@ -261,13 +260,11 @@ local function findNearestLocker()
     return nearest
 end
 
--- FIX: Смещаем цель на 2.5 студа перед шкафом (к дверце), а не к центру модели
 local function getLockerPosition(locker)
     if not locker then return nil end
     local root = locker:FindFirstChild("Main") or locker:FindFirstChildOfClass("Part")
         or locker:FindFirstChildOfClass("MeshPart") or locker.PrimaryPart
     if not root then return nil end
-    -- Смещаем цель вперёд по LookVector — к дверце шкафа
     local cf = root.CFrame
     return cf.Position + cf.LookVector * 2.5
 end
@@ -296,24 +293,18 @@ function findEntity()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return nil, nil end
     local myPos = LocalPlayer.Character.HumanoidRootPart.Position
 
-    -- FIX: Сначала сканируем workspace напрямую (дети верхнего уровня) —
-    -- сущности как правило сидят прямо в workspace, а не внутри CurrentRooms.
-    -- Это быстрее чем GetDescendants() всего workspace.
     local scanTargets = {}
     for _, obj in pairs(workspace:GetChildren()) do
         if obj:IsA("Model") and obj ~= LocalPlayer.Character then
             table.insert(scanTargets, obj)
         end
     end
-    -- Проверяем CurrentRooms: прямые дети комнат + их прямые дети (2 уровня)
-    -- GetDescendants на всём workspace слишком медленно при большом числе комнат
     if workspace:FindFirstChild("CurrentRooms") then
         for _, room in pairs(workspace.CurrentRooms:GetChildren()) do
             for _, obj in pairs(room:GetChildren()) do
                 if obj:IsA("Model") and not obj:IsDescendantOf(LocalPlayer.Character) then
                     table.insert(scanTargets, obj)
                 end
-                -- Второй уровень вложенности
                 for _, obj2 in pairs(obj:GetChildren()) do
                     if obj2:IsA("Model") and not obj2:IsDescendantOf(LocalPlayer.Character) then
                         table.insert(scanTargets, obj2)
@@ -416,8 +407,9 @@ local lastFloorCheckTime  = -999
 local lastBunkerExitTime  = -999
 local lastFastCheckTime   = -999
 
--- Ищем объект по имени только среди прямых детей workspace и CurrentRooms
--- Не трогаем GetDescendants — слишком медленно для каждого кадра
+-- FIX #2: Флаг немедленной обработки А-120 — чтобы не ждать следующего тика
+local a120PendingReact    = false
+
 local function fastScanByName(pattern1, pattern2, pattern3)
     if not LocalPlayer.Character then return nil end
     local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -441,12 +433,10 @@ local function fastScanByName(pattern1, pattern2, pattern3)
         return nil
     end
 
-    -- Прямые дети workspace
     for _, obj in pairs(workspace:GetChildren()) do
         local found = checkObj(obj)
         if found then return found end
     end
-    -- Прямые дети каждой комнаты
     if workspace:FindFirstChild("CurrentRooms") then
         for _, room in pairs(workspace.CurrentRooms:GetChildren()) do
             for _, obj in pairs(room:GetChildren()) do
@@ -466,7 +456,6 @@ local function fastA120Check()
     return fastScanByName("a120", "a%-120", nil)
 end
 
--- Чистим кеш скоростей раз в 30 сек чтобы не рос бесконечно
 local lastCacheCleanTime = 0
 local function cleanSpeedCache()
     local now = os.clock()
@@ -528,6 +517,40 @@ local function isA120Gone(entity)
     return false
 end
 
+-- FIX #2: Мгновенная реакция на А-120 — вызывается сразу при детекте, без wait
+-- Показываем алерт и начинаем навигацию к шкафу в том же тике
+local function reactToA120Immediately(entity, hrp, humanoid)
+    if a120Mode ~= "none" and a120Mode ~= "resuming" then return end
+    a120Entity = entity
+    forceEmergencyStop = true
+    forceRecomputePath = true
+    currentTarget = nil
+
+    -- Алерт НЕМЕДЛЕННО, до любых вычислений
+    AlertLabel.Text = "🔵 А-120! ИЩУ ШКАФ..."
+    AlertLabel.Visible = true
+
+    local locker = findNearestLocker()
+    if locker then
+        local lockerPos = getLockerPosition(locker)
+        if lockerPos then
+            a120LockerTarget = lockerPos
+            currentTarget = lockerPos
+            a120Mode = "navigating"
+            AlertLabel.Text = "🔵 А-120! БЕГУ К ШКАФУ!"
+        else
+            a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
+            AlertLabel.Text = "⚠️ А-120! ШКАФ СЛОМАН — ПРЯЧУСЬ!"
+        end
+    else
+        a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
+        AlertLabel.Text = "⚠️ А-120! НЕТ ШКАФОВ — ПРЯЧУСЬ!"
+    end
+
+    -- Сбрасываем кулдаун чтобы основной детект не перезаписал состояние
+    lastEntityCheckTime = os.clock()
+end
+
 -- ====== RENDER LOOP ======
 local RenderConnection
 RenderConnection = RunService.PreRender:Connect(function()
@@ -544,23 +567,24 @@ RenderConnection = RunService.PreRender:Connect(function()
 
     local now = os.clock()
 
-    -- Чистим кеш скоростей периодически
     cleanSpeedCache()
 
-    -- Быстрый ранний детект A-120 (каждые 0.05 сек, без полного сканирования)
+    -- FIX #2: А-120 быстрый детект — каждые 0.03 сек (было 0.05)
+    -- И немедленно реагируем, не ждём следующего тика основного детекта
     if not isSafeInBunker and not isTeleporting and not isReturning
        and (a120Mode == "none" or a120Mode == "resuming")
-       and (now - lastFastCheckTime) > 0.05 then
+       and (now - lastFastCheckTime) > 0.03 then
+        lastFastCheckTime = now
         local fastA120 = fastA120Check()
-        if fastA120 and a120Mode ~= "navigating" and a120Mode ~= "hiding" then
-            -- Немедленно запускаем полный findEntity чтобы получить тип и обработать
-            lastEntityCheckTime = -999
+        if fastA120 then
+            -- Немедленная реакция без задержки
+            reactToA120Immediately(fastA120, hrp, humanoid)
         end
     end
 
-    -- Быстрый ранний детект A-60
+    -- Быстрый детект A-60 (отдельно от А-120)
     if not isSafeInBunker and not isTeleporting and not isReturning
-       and a120Mode == "none" and (now - lastFastCheckTime) > 0.05 then
+       and a120Mode == "none" and (now - lastFastCheckTime) > 0.03 then
         lastFastCheckTime = now
         local fastEntity = fastA60Check()
         if fastEntity and not isSafeInBunker then
@@ -569,12 +593,13 @@ RenderConnection = RunService.PreRender:Connect(function()
                 forceEmergencyStop = true
                 currentTarget = nil
                 forceRecomputePath = true
-                AlertLabel.Text = "🚨 А-60 ОБНАРУЖЕН ЗАРАНЕЕ! 🚨"
+                -- FIX #3: Алерт СРАЗУ, до wait
+                AlertLabel.Text = "🚨 А-60 ОБНАРУЖЕН! 🚨"
                 AlertLabel.Visible = true
                 currentTrackingEntity = fastEntity
                 lockTimer = now
 
-                wait(0.5)
+                wait(1)
 
                 local floorY = getFloorY(getCurrentRoom())
                 savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
@@ -654,11 +679,8 @@ RenderConnection = RunService.PreRender:Connect(function()
     if (a120Mode == "hiding" or a120Mode == "navigating") and isA120Gone(a120Entity) then
         AlertLabel.Text = "✅ А-120 ушел!"
         AlertLabel.Visible = true
-        -- FIX: сразу сбрасываем в "none" — не держим "resuming" долго,
-        -- чтобы новый A-120 сразу детектился
         currentTarget = nil; a120Mode = "none"; a120Entity = nil
         a120LockerTarget = nil; forceRecomputePath = true; forceEmergencyStop = false
-        -- FIX: сбрасываем кулдаун детекта — следующий A-120 должен быть замечен немедленно
         lastEntityCheckTime = -999
         lastFastCheckTime = -999
         task.spawn(function()
@@ -734,8 +756,7 @@ RenderConnection = RunService.PreRender:Connect(function()
 
     else
         -- ДЕТЕКТ A-60 / A-120 (основной, полный)
-        -- FIX: A-120 проверяем всегда (без кулдауна lastBunkerExitTime),
-        --      A-60 по-прежнему ждёт 3 сек после выхода из бункера
+        -- А-120 проверяем только если быстрый детект ещё не среагировал
         if not isReturning and not isTeleporting and not isSafeInBunker
            and (a120Mode == "none" or a120Mode == "resuming")
            and (now - lastEntityCheckTime) > 0.08 then
@@ -745,32 +766,10 @@ RenderConnection = RunService.PreRender:Connect(function()
 
             if Entity and detectedType then
                 if detectedType == "A120" then
-                    a120Entity = Entity
-                    forceEmergencyStop = true
-                    forceRecomputePath = true
-                    currentTarget = nil
-                    local locker = findNearestLocker()
-                    if locker then
-                        local lockerPos = getLockerPosition(locker)
-                        if lockerPos then
-                            a120LockerTarget = lockerPos
-                            currentTarget = lockerPos
-                            a120Mode = "navigating"
-                            AlertLabel.Text = "🔵 А-120! БЕГУ К ШКАФУ!"
-                            AlertLabel.Visible = true
-                        else
-                            a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
-                            AlertLabel.Text = "⚠️ ШКАФ СЛОМАН!"
-                            AlertLabel.Visible = true
-                        end
-                    else
-                        a120Mode = "hiding"; a120LockerTarget = nil; forceEmergencyStop = false
-                        AlertLabel.Text = "⚠️ НЕТ ШКАФОВ!"
-                        AlertLabel.Visible = true
-                    end
+                    -- FIX #2: Используем мгновенную функцию реакции
+                    reactToA120Immediately(Entity, hrp, humanoid)
 
                 elseif detectedType == "A60" then
-                    -- FIX: Пропускаем A-60 если кулдаун после бункера не прошёл
                     if (now - lastBunkerExitTime) <= 3.0 then
                         -- ничего не делаем
                     else
@@ -778,6 +777,7 @@ RenderConnection = RunService.PreRender:Connect(function()
                     forceEmergencyStop = true
                     currentTarget = nil
                     forceRecomputePath = true
+                    -- FIX #3: Алерт СРАЗУ до wait
                     AlertLabel.Text = "🚨 А-60! УХОДИМ НАВЕРХ... 🚨"
                     AlertLabel.Visible = true
                     currentTrackingEntity = Entity
@@ -795,7 +795,7 @@ RenderConnection = RunService.PreRender:Connect(function()
 
                     isSafeInBunker = true
                     isTeleporting = false
-                    end -- конец проверки кулдауна A-60
+                    end
                 end
             end
         end
@@ -840,7 +840,6 @@ while true do
                 end
             end
 
-            -- FIX: Порог увеличен с 5.0 до 7.0 — учитываем что lockerPos со смещением
             if a120Mode == "navigating" and hrp and not isSafeInBunker then
                 local d = (Vector3.new(a120LockerTarget.X, hrp.Position.Y, a120LockerTarget.Z) - hrp.Position).Magnitude
                 if d <= 7.0 then
@@ -851,18 +850,15 @@ while true do
                 end
             end
         else
-            -- FIX: Попытка найти другой шкаф вместо немедленного "hiding"
             local fallbackLocker = findNearestLocker()
             if fallbackLocker then
                 local newPos = getLockerPosition(fallbackLocker)
                 if newPos and (newPos - a120LockerTarget).Magnitude > 3 then
-                    -- Нашли другой шкаф — пробуем его
                     a120LockerTarget = newPos
                     currentTarget = newPos
                     AlertLabel.Text = "🔵 ПЕРЕХОЖУ К ДРУГОМУ ШКАФУ..."
                     AlertLabel.Visible = true
                 else
-                    -- Тот же шкаф или nil — путь точно сломан
                     a120Mode = "hiding"; a120LockerTarget = nil; currentTarget = nil; forceEmergencyStop = false
                     AlertLabel.Text = "⚠️ ПУТЬ К ШКАФУ СЛОМАН!"
                     AlertLabel.Visible = true
