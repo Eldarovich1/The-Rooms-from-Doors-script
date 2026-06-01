@@ -604,7 +604,7 @@ RenderConnection = RunService.PreRender:Connect(function()
                 currentTrackingEntity = fastEntity
                 lockTimer = now
 
-                wait(1)
+                wait(1.5)
 
                 local floorY = getFloorY(getCurrentRoom())
                 savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
@@ -788,7 +788,7 @@ RenderConnection = RunService.PreRender:Connect(function()
                     currentTrackingEntity = Entity
                     lockTimer = os.clock()
 
-                    wait(1.5)
+                    wait(2)
 
                     local floorY = getFloorY(getCurrentRoom())
                     savedPosition = Vector3.new(hrp.Position.X, floorY + 3, hrp.Position.Z)
